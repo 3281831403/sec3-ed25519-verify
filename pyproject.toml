@@ -1,0 +1,9 @@
+[project]
+name = "sec3-ed25519-verify"
+version = "0.1.0"
+description = "Ed25519 public key and signature validation helpers"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
