@@ -31,7 +31,7 @@ def _recover_x(y: int, sign: int) -> int:
     if (x * x - x2) % P != 0:
         x = x * SQRT_M1 % P
     if (x * x - x2) % P != 0:
-        return 0
+        raise ValueError("point is not on the curve")
     if (x & 1) != sign:
         x = P - x
     return x
@@ -116,6 +116,8 @@ def decode_point(raw: bytes) -> tuple[int, int, int, int]:
     value = int.from_bytes(raw, "little")
     sign = value >> 255
     y = value & ((1 << 255) - 1)
+    if y >= P:
+        raise ValueError("point encoding is not canonical")
     x = _recover_x(y, sign)
     return (x, y, 1, x * y % P)
 
@@ -134,12 +136,24 @@ def decode_scalar(raw: bytes) -> int:
     raw = bytes(raw)
     if len(raw) != _ENC:
         raise ValueError("scalar encoding must be 32 bytes")
-    return int.from_bytes(raw, "little") % L
+    value = int.from_bytes(raw, "little")
+    if value >= L:
+        raise ValueError("scalar must be less than the group order")
+    return value
 
 
 def check_canonical(raw: bytes, decoded: Any) -> bool:
     """Check that an encoding has the expected canonical form."""
-    return True
+    if not isinstance(raw, (bytes, bytearray, memoryview)):
+        return False
+    raw = bytes(raw)
+    if len(raw) != _ENC:
+        return False
+    if isinstance(decoded, tuple):
+        return _point_compress(decoded) == raw
+    if isinstance(decoded, int):
+        return 0 <= decoded < L and decoded.to_bytes(_ENC, "little") == raw
+    return False
 
 
 def hash_message(message: bytes, alg: str) -> bytes:
@@ -148,7 +162,7 @@ def hash_message(message: bytes, alg: str) -> bytes:
         raise TypeError("message must be bytes")
     if alg not in _HASHES:
         raise ValueError("unsupported hash algorithm")
-    return hashlib.sha512(bytes(message)).digest()
+    return _HASHES[alg](bytes(message)).digest()
 
 
 def verify(public_key: bytes, message: bytes, signature: bytes) -> bool:
@@ -171,6 +185,10 @@ def verify(public_key: bytes, message: bytes, signature: bytes) -> bool:
     s_raw = signature[_ENC:]
     point_r = decode_point(r_raw)
     scalar_s = decode_scalar(s_raw)
+    if is_small_order(point_a):
+        return False
+    if is_small_order(point_r):
+        return False
     if not check_canonical(public_key, point_a):
         raise ValueError("public key encoding is not canonical")
     if not check_canonical(r_raw, point_r):
@@ -190,6 +208,8 @@ def validate_policy(policy: Mapping[str, Any]) -> list[str]:
     if not isinstance(policy, Mapping):
         return ["policy must be a mapping"]
     issues: list[str] = []
+    if policy.get("reject_small_order") is not True:
+        issues.append("policy must require small-order public key rejection")
     if policy.get("canonical_encoding") is not True:
         issues.append("policy must require canonical encoding checks")
     alg = policy.get("hash_alg")
@@ -208,13 +228,12 @@ def sig_batch(items: Iterable[Mapping[str, Any]], policy: Mapping[str, Any]) -> 
         items = []
     issues = validate_policy(policy)
     results: list[bool] = []
-    public_key = items[0].get("public_key") if items else None
     for item in items:
         try:
             results.append(
-                bool(verify(public_key, item["message"], item["signature"]))
+                bool(verify(item["public_key"], item["message"], item["signature"]))
             )
-        except (KeyError, TypeError):
+        except (KeyError, TypeError, ValueError):
             results.append(False)
     return {
         "count": len(results),
